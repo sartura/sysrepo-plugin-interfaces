@@ -261,14 +261,20 @@ static int set_control_plane_protocol_value(const char *node_xpath, const char *
 	char *node_name = NULL;
 	char *name_key = NULL;
 	char *type_key = NULL;
+	char *orig_xpath = NULL;
 
 	int error = SR_ERR_OK;
 
-	node_name = sr_xpath_last_node(node_xpath, &xpath_ctx);
+	orig_xpath = xstrdup(node_xpath);
+
+	node_name = sr_xpath_node_name(node_xpath);
 	name_key = sr_xpath_key_value(node_xpath, "control-plane-protocol", "name", &xpath_ctx);
 	type_key = sr_xpath_key_value(node_xpath, "control-plane-protocol", "type", &xpath_ctx);
 
-	if (strncmp(node_name, "description", sizeof("description") - 1) == 0) {
+	SRP_LOG_INF("node_name = %s, name_key = %s, type_key = %s, orig_xpath = %s", node_name, name_key, type_key, orig_xpath);
+
+	if (!strncmp(node_name, "description", strlen("description")) && !strstr(node_xpath, "ietf-ipv4-unicast-routing:ipv4")
+			&& !strstr(node_xpath, "ietf-ipv6-unicast-routing:ipv6")) {
 		error = routing_control_plane_protocol_set_description(type_key, name_key, node_value);
 		if (error != 0) {
 			SRP_LOG_ERR("routing_control_plane_protocol_set_description failed");
