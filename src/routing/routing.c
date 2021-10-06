@@ -62,12 +62,14 @@
 // sysrepocfg
 #define SYSREPOCFG_EMPTY_CHECK_COMMAND "sysrepocfg -X -d running -m " BASE_YANG_MODEL
 
-// module changes
-static int routing_module_change_control_plane_protocol_list_cb(sr_session_ctx_t *session, uint32_t subscription_id, const char *module_name, const char *xpath, sr_event_t event, uint32_t request_id, void *private_data);
-static int routing_module_change_rib_list_cb(sr_session_ctx_t *session, uint32_t subscription_id, const char *module_name, const char *xpath, sr_event_t event, uint32_t request_id, void *private_data);
+// module change
+static int routing_module_change_cb(sr_session_ctx_t *session, uint32_t subscription_id, const char *module_name, const char *xpath, sr_event_t event, uint32_t request_id, void *private_data);
 
-// module changes helpers - changing/deleting values
+// module change helpers - changing/deleting values
 static int set_control_plane_protocol_value(const char *xpath, const char *value);
+static int delete_control_plane_protocol_value(const char *xpath);
+static int set_rib_value(const char *node_xpath, const char *node_value);
+static int delete_rib_value(const char *node_xpath);
 
 // getting xpath from the node
 static char *routing_xpath_get(const struct lyd_node *node);
@@ -134,14 +136,7 @@ int sr_plugin_init_cb(sr_session_ctx_t *session, void **private_data)
 	SRP_LOG_INF("subscribing to module change");
 
 	// control-plane-protocol list module changes
-	error = sr_module_change_subscribe(session, BASE_YANG_MODEL, ROUTING_CONTROL_PLANE_PROTOCOL_LIST_YANG_PATH, routing_module_change_control_plane_protocol_list_cb, *private_data, 0, SR_SUBSCR_DEFAULT, &subscription);
-	if (error) {
-		SRP_LOG_ERR("sr_module_change_subscribe error (%d): %s", error, sr_strerror(error));
-		goto error_out;
-	}
-
-	// rib list module changes
-	error = sr_module_change_subscribe(session, BASE_YANG_MODEL, ROUTING_RIB_LIST_YANG_PATH, routing_module_change_rib_list_cb, *private_data, 0, SR_SUBSCR_DEFAULT, &subscription);
+	error = sr_module_change_subscribe(session, BASE_YANG_MODEL, "/" BASE_YANG_MODEL ":*//.", routing_module_change_cb, *private_data, 0, SR_SUBSCR_DEFAULT, &subscription);
 	if (error) {
 		SRP_LOG_ERR("sr_module_change_subscribe error (%d): %s", error, sr_strerror(error));
 		goto error_out;
@@ -183,7 +178,7 @@ void sr_plugin_cleanup_cb(sr_session_ctx_t *session, void *private_data)
 {
 }
 
-static int routing_module_change_control_plane_protocol_list_cb(sr_session_ctx_t *session, uint32_t subscription_id, const char *module_name, const char *xpath, sr_event_t event, uint32_t request_id, void *private_data)
+static int routing_module_change_cb(sr_session_ctx_t *session, uint32_t subscription_id, const char *module_name, const char *xpath, sr_event_t event, uint32_t request_id, void *private_data)
 {
 	int error = 0;
 
@@ -230,11 +225,36 @@ static int routing_module_change_control_plane_protocol_list_cb(sr_session_ctx_t
 
 			SRP_LOG_DBG("node_xpath: %s; prev_val: %s; node_val: %s; operation: %d", node_xpath, prev_value, node_value, operation);
 
+
 			if (node->schema->nodetype == LYS_LEAF || node->schema->nodetype == LYS_LEAFLIST) {
-				error = set_control_plane_protocol_value(node_xpath, node_value);
-				if (error) {
-					SRP_LOG_ERR("set_control_plane_protocol_value error (%d)", error);
-					goto error_out;
+				if (operation == SR_OP_CREATED || operation == SR_OP_MODIFIED) {
+					if (strstr(node_xpath, "/ietf-routing:routing/ribs")) {
+						error = set_rib_value(node_xpath, node_value);
+						if (error) {
+							SRP_LOG_ERR("set_control_plane_protocol_value error (%d)", error);
+							goto error_out;
+						}
+					} else if (strstr(node_xpath, "ietf-routing:routing/control-plane-protocols")) {
+						error = set_control_plane_protocol_value(node_xpath, node_value);
+						if (error) {
+							SRP_LOG_ERR("set_control_plane_protocol_value error (%d)", error);
+							goto error_out;
+						}
+					}
+				} else if (operation == SR_OP_DELETED) {
+					if (strstr(node_xpath, "/ietf-routing:routing/ribs")) {
+						error = delete_rib_value(node_xpath);
+						if (error) {
+							SRP_LOG_ERR("set_control_plane_protocol_value error (%d)", error);
+							goto error_out;
+						}
+					} else if (strstr(node_xpath, "ietf-routing:routing/control-plane-protocols")) {
+						error = delete_control_plane_protocol_value(node_xpath);
+						if (error) {
+							SRP_LOG_ERR("set_control_plane_protocol_value error (%d)", error);
+							goto error_out;
+						}
+					}
 				}
 			}
 			FREE_SAFE(node_xpath);
@@ -262,6 +282,8 @@ static int set_control_plane_protocol_value(const char *node_xpath, const char *
 	char *name_key = NULL;
 	char *type_key = NULL;
 	char *orig_xpath = NULL;
+	char *next_hop_list = NULL;
+	char *destination_prefix = NULL;
 
 	int error = SR_ERR_OK;
 
@@ -271,19 +293,74 @@ static int set_control_plane_protocol_value(const char *node_xpath, const char *
 	name_key = sr_xpath_key_value(node_xpath, "control-plane-protocol", "name", &xpath_ctx);
 	type_key = sr_xpath_key_value(node_xpath, "control-plane-protocol", "type", &xpath_ctx);
 
-	SRP_LOG_INF("node_name = %s, name_key = %s, type_key = %s, orig_xpath = %s", node_name, name_key, type_key, orig_xpath);
-
-	if (!strncmp(node_name, "description", strlen("description")) && !strstr(node_xpath, "ietf-ipv4-unicast-routing:ipv4")
-			&& !strstr(node_xpath, "ietf-ipv6-unicast-routing:ipv6")) {
+	if (!strcmp(node_name, "description") && !strstr(orig_xpath, "ietf-ipv4-unicast-routing:ipv4")
+			&& !strstr(orig_xpath, "ietf-ipv6-unicast-routing:ipv6")) {
 		error = routing_control_plane_protocol_set_description(type_key, name_key, node_value);
 		if (error != 0) {
 			SRP_LOG_ERR("routing_control_plane_protocol_set_description failed");
+			goto out;
+		}
+	} else if (strstr(orig_xpath, "ietf-ipv4-unicast-routing:ipv4")) {
+		next_hop_list = sr_xpath_key_value(orig_xpath, "next-hop", "index", &xpath_ctx);
+		destination_prefix = sr_xpath_key_value(orig_xpath, "route", "destination-prefix", &xpath_ctx);
+
+		if (destination_prefix == NULL) {
+			error = -1;
+			SRP_LOG_ERR("destination-prefix couldn't be retrieved");
+			goto out;
+		}
+
+		if (next_hop_list != NULL) {
+			SRP_LOG_INF("got list node_name = %s, name_key = %s, type_key = %s, orig_xpath = %s", node_name, name_key, type_key, orig_xpath);
+		} else if (!strcmp(node_name, "destination-prefix")) {
+			SRP_LOG_INF("got dest prefix  node_name = %s, name_key = %s, type_key = %s, orig_xpath = %s", node_name, name_key, type_key, orig_xpath);
+
+		} else if (!strcmp(node_name, "description")) {
+			SRP_LOG_INF("got descr node_name = %s, name_key = %s, type_key = %s, orig_xpath = %s", node_name, name_key, type_key, orig_xpath);
+			SRP_LOG_INF("destination-prefix = %s\n", destination_prefix);
+		} else if (!strcmp(node_name, "next-hop-address")) {
+			SRP_LOG_INF("got next-hop-address node_name = %s, name_key = %s, type_key = %s, orig_xpath = %s", node_name, name_key, type_key, orig_xpath);
+			SRP_LOG_INF("destination-prefix = %s\n", destination_prefix);
+		}
+	} else if (strstr(orig_xpath, "ietf-ipv6-unicast-routing:ipv6")) {
+	}
+
+out:
+	return error ? SR_ERR_CALLBACK_FAILED : SR_ERR_OK;
+}
+
+static int delete_control_plane_protocol_value(const char *node_xpath)
+{
+	return 0;
+}
+
+static int set_rib_value(const char *node_xpath, const char *node_value)
+{
+	sr_xpath_ctx_t xpath_ctx = {0};
+
+	char *name_key = NULL;
+	char *node_name = NULL;
+
+	int error = SR_ERR_OK;
+
+	node_name = sr_xpath_node_name(node_xpath);
+	name_key = sr_xpath_key_value(node_xpath, "rib", "name", &xpath_ctx);
+
+	if (!strcmp(node_name, "description")) {
+		error = routing_rib_set_description(name_key, node_value);
+		if (error != 0) {
+			SRP_LOG_ERR("routing_rib_set_description failed");
 			goto out;
 		}
 	}
 
 out:
 	return error ? SR_ERR_CALLBACK_FAILED : SR_ERR_OK;
+}
+
+static int delete_rib_value(const char *node_xpath)
+{
+	return 0;
 }
 
 static int routing_module_change_rib_list_cb(sr_session_ctx_t *session, uint32_t subscription_id, const char *module_name, const char *xpath, sr_event_t event, uint32_t request_id, void *private_data)
