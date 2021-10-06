@@ -100,6 +100,12 @@ static int routing_build_protos_map(struct control_plane_protocol map[ROUTING_PR
 static inline int routing_is_proto_type_known(int type);
 static bool routing_running_datastore_is_empty(void);
 
+static struct route_list_hash *ipv4_static_routes = NULL;
+static struct route_list_hash *ipv6_static_routes = NULL;
+
+static int static_routes_init(struct route_list_hash **ipv4_routes, struct route_list_hash **ipv6_routes);
+static void foreach_nexthop(struct rtnl_nexthop *nh, void *arg);
+
 int sr_plugin_init_cb(sr_session_ctx_t *session, void **private_data)
 {
 	int error = 0;
@@ -118,6 +124,12 @@ int sr_plugin_init_cb(sr_session_ctx_t *session, void **private_data)
 	}
 
 	*private_data = startup_session;
+
+	error = static_routes_init(&ipv4_static_routes, &ipv6_static_routes);
+	if (error) {
+		SRP_LOG_ERR("static_routes_init error");
+		goto error_out;
+	}
 
 	if (routing_running_datastore_is_empty()) {
 		SRP_LOG_INF("running datasore is empty -> loading data");
@@ -173,6 +185,90 @@ error_out:
 out:
 	return error;
 }
+
+static int static_routes_init(struct route_list_hash **ipv4_routes, struct route_list_hash **ipv6_routes)
+{
+	int nl_err = 0;
+	int error = 0;
+
+	struct nl_sock *socket = NULL;
+	struct rtnl_route *route = NULL;
+	struct nl_cache *cache = NULL;
+	struct route tmp_route = {0};
+
+	*ipv4_routes = xmalloc(sizeof(struct route_list_hash));
+	*ipv6_routes = xmalloc(sizeof(struct route_list_hash));
+
+	route_list_hash_init(*ipv4_routes);
+	route_list_hash_init(*ipv6_routes);
+
+	socket = nl_socket_alloc();
+	if (socket == NULL) {
+		SRP_LOG_ERR("unable to init nl_sock struct...");
+		goto error_out;
+	}
+
+	nl_err = nl_connect(socket, NETLINK_ROUTE);
+	if (nl_err != 0) {
+		SRP_LOG_ERR("nl_connect failed (%d): %s", nl_err, nl_geterror(nl_err));
+		goto error_out;
+	}
+
+	nl_err = rtnl_route_alloc_cache(socket, AF_UNSPEC, 0, &cache);
+	if (nl_err != 0) {
+		SRP_LOG_ERR("rtnl_route_alloc_cache failed (%d): %s", nl_err, nl_geterror(nl_err));
+		goto error_out;
+	}
+
+
+	// find all routes added statically and add them to the CPPs static-routes container
+	route = (struct rtnl_route *) nl_cache_get_first(cache);
+	while (route != NULL) {
+		const int PROTO = rtnl_route_get_protocol(route);
+
+		if (PROTO == RTPROT_STATIC) {
+			const int AF = rtnl_route_get_family(route);
+			// fill the route with info and add to the hash of the current RIB
+			route_init(&tmp_route);
+			route_set_preference(&tmp_route, rtnl_route_get_priority(route));
+
+			// next-hop container -> TODO: see what about special type
+			const int NEXTHOP_COUNT = rtnl_route_get_nnexthops(route);
+			if (NEXTHOP_COUNT == 1) {
+				struct rtnl_nexthop *nh = rtnl_route_nexthop_n(route, 0);
+				route_next_hop_set_simple(&tmp_route.next_hop, rtnl_route_nh_get_ifindex(nh), rtnl_route_nh_get_gateway(nh));
+			} else {
+				rtnl_route_foreach_nexthop(route, foreach_nexthop, &tmp_route.next_hop);
+			}
+
+			// route-metadata/source-protocol
+			route_set_source_protocol(&tmp_route, "ietf-routing:static");
+
+			// add the route to the protocol's container
+			if (AF == AF_INET) {
+				// v4
+				route_list_hash_add(*ipv4_routes, rtnl_route_get_dst(route), &tmp_route);
+			} else if (AF == AF_INET6) {
+				// v6
+				route_list_hash_add(*ipv6_routes, rtnl_route_get_dst(route), &tmp_route);
+			}
+
+			route_free(&tmp_route);
+		}
+		route = (struct rtnl_route *) nl_cache_get_next((struct nl_object *) route);
+	}
+
+	goto out;
+
+error_out:
+	SRP_LOG_ERR("error initializing static routes");
+	error = -1;
+out:
+	nl_cache_free(cache);
+	nl_socket_free(socket);
+	return error;
+}
+
 
 void sr_plugin_cleanup_cb(sr_session_ctx_t *session, void *private_data)
 {
@@ -1339,12 +1435,6 @@ static int routing_load_control_plane_protocols(sr_session_ctx_t *session, struc
 	struct lyd_node *route_node = NULL;
 	struct lyd_node *nh_node = NULL, *nh_list_node = NULL;
 
-	// libnl
-	struct nl_sock *socket = NULL;
-	struct nl_cache *cache = NULL;
-	struct nl_cache *link_cache = NULL;
-	struct rtnl_route *route = NULL;
-
 	// temp buffers
 	char list_buffer[PATH_MAX] = {0};
 	char ip_buffer[INET6_ADDRSTRLEN] = {0};
@@ -1353,9 +1443,7 @@ static int routing_load_control_plane_protocols(sr_session_ctx_t *session, struc
 
 	// control-plane-protocol structs
 	struct control_plane_protocol cpp_map[ROUTING_PROTOS_COUNT] = {0};
-	const struct control_plane_protocol *STATIC_PROTO = &cpp_map[RTPROT_STATIC];
-	const struct route_list_hash *ipv4_static_routes = &STATIC_PROTO->ipv4_static.routes;
-	const struct route_list_hash *ipv6_static_routes = &STATIC_PROTO->ipv6_static.routes;
+	struct control_plane_protocol *STATIC_PROTO = &cpp_map[RTPROT_STATIC];
 	struct route tmp_route = {0};
 
 	ly_ctx = sr_get_context(sr_session_get_connection(session));
@@ -1365,30 +1453,6 @@ static int routing_load_control_plane_protocols(sr_session_ctx_t *session, struc
 	} else {
 		SRP_LOG_ERR("unable to load external modules... exiting");
 		error = -1;
-		goto error_out;
-	}
-
-	socket = nl_socket_alloc();
-	if (socket == NULL) {
-		SRP_LOG_ERR("unable to init nl_sock struct...");
-		goto error_out;
-	}
-
-	nl_err = nl_connect(socket, NETLINK_ROUTE);
-	if (nl_err != 0) {
-		SRP_LOG_ERR("nl_connect failed (%d): %s", nl_err, nl_geterror(nl_err));
-		goto error_out;
-	}
-
-	nl_err = rtnl_route_alloc_cache(socket, AF_UNSPEC, 0, &cache);
-	if (nl_err != 0) {
-		SRP_LOG_ERR("rtnl_route_alloc_cache failed (%d): %s", nl_err, nl_geterror(nl_err));
-		goto error_out;
-	}
-
-	nl_err = rtnl_link_alloc_cache(socket, AF_UNSPEC, &link_cache);
-	if (nl_err != 0) {
-		SRP_LOG_ERR("rtnl_link_alloc_cache failed (%d): %s", nl_err, nl_geterror(nl_err));
 		goto error_out;
 	}
 
@@ -1409,46 +1473,6 @@ static int routing_load_control_plane_protocols(sr_session_ctx_t *session, struc
 	if (error) {
 		SRP_LOG_ERR("unable to build protocols mapping array: %d", error);
 		goto error_out;
-	}
-
-	route_list_hash_init((struct route_list_hash *) ipv4_static_routes);
-	route_list_hash_init((struct route_list_hash *) ipv6_static_routes);
-
-	// find all routes added statically and add them to the CPPs static-routes container
-	route = (struct rtnl_route *) nl_cache_get_first(cache);
-	while (route != NULL) {
-		const int PROTO = rtnl_route_get_protocol(route);
-
-		if (PROTO == RTPROT_STATIC) {
-			const int AF = rtnl_route_get_family(route);
-			// fill the route with info and add to the hash of the current RIB
-			route_init(&tmp_route);
-			route_set_preference(&tmp_route, rtnl_route_get_priority(route));
-
-			// next-hop container -> TODO: see what about special type
-			const int NEXTHOP_COUNT = rtnl_route_get_nnexthops(route);
-			if (NEXTHOP_COUNT == 1) {
-				struct rtnl_nexthop *nh = rtnl_route_nexthop_n(route, 0);
-				route_next_hop_set_simple(&tmp_route.next_hop, rtnl_route_nh_get_ifindex(nh), rtnl_route_nh_get_gateway(nh));
-			} else {
-				rtnl_route_foreach_nexthop(route, foreach_nexthop, &tmp_route.next_hop);
-			}
-
-			// route-metadata/source-protocol
-			route_set_source_protocol(&tmp_route, "ietf-routing:static");
-
-			// add the route to the protocol's container
-			if (AF == AF_INET) {
-				// v4
-				route_list_hash_add((struct route_list_hash *) ipv4_static_routes, rtnl_route_get_dst(route), &tmp_route);
-			} else if (AF == AF_INET6) {
-				// v6
-				route_list_hash_add((struct route_list_hash *) ipv6_static_routes, rtnl_route_get_dst(route), &tmp_route);
-			}
-
-			route_free(&tmp_route);
-		}
-		route = (struct rtnl_route *) nl_cache_get_next((struct nl_object *) route);
 	}
 
 	ly_err = lyd_new_path(routing_container_node, ly_ctx, ROUTING_CONTROL_PLANE_PROTOCOLS_CONTAINER_YANG_PATH, NULL, 0, &cpp_container_node);
@@ -1665,9 +1689,7 @@ out:
 	for (int i = 0; i < ROUTING_PROTOS_COUNT; i++) {
 		control_plane_protocol_free(&cpp_map[i]);
 	}
-	nl_socket_free(socket);
-	nl_cache_free(cache);
-	nl_cache_free(link_cache);
+
 	return error;
 }
 
