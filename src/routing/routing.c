@@ -271,6 +271,7 @@ error_out:
 	error = -1;
 out:
 	nl_cache_free(cache);
+	nl_cache_free(link_cache);
 	nl_socket_free(socket);
 	return error;
 }
@@ -278,6 +279,11 @@ out:
 
 void sr_plugin_cleanup_cb(sr_session_ctx_t *session, void *private_data)
 {
+	route_list_hash_free(ipv4_static_routes);
+	route_list_hash_free(ipv6_static_routes);
+	FREE_SAFE(ipv4_static_routes);
+	FREE_SAFE(ipv6_static_routes);
+
 }
 
 static int routing_module_change_cb(sr_session_ctx_t *session, uint32_t subscription_id, const char *module_name, const char *xpath, sr_event_t event, uint32_t request_id, void *private_data)
