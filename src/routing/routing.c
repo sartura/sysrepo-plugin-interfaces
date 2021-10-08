@@ -833,7 +833,26 @@ out:
 
 static int delete_rib_value(const char *node_xpath)
 {
-	return 0;
+	sr_xpath_ctx_t xpath_ctx = {0};
+
+	char *name_key = NULL;
+	char *node_name = NULL;
+
+	int error = SR_ERR_OK;
+
+	node_name = sr_xpath_node_name(node_xpath);
+	name_key = sr_xpath_key_value(node_xpath, "rib", "name", &xpath_ctx);
+
+	if (!strcmp(node_name, "description")) {
+		error = routing_rib_set_description(name_key, "");
+		if (error != 0) {
+			SRP_LOG_ERR("routing_rib_set_description failed");
+			goto out;
+		}
+	}
+
+out:
+	return error ? SR_ERR_CALLBACK_FAILED : SR_ERR_OK;
 }
 
 static int routing_module_change_rib_list_cb(sr_session_ctx_t *session, uint32_t subscription_id, const char *module_name, const char *xpath, sr_event_t event, uint32_t request_id, void *private_data)
