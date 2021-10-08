@@ -3,8 +3,6 @@
 #include "route/list_hash.h"
 #include "utils/memory.h"
 
-struct route_list *get_list_by_addr(struct route_list_hash *hash, struct nl_addr *addr);
-
 void route_list_hash_init(struct route_list_hash *hash)
 {
 	hash->list_addr = NULL;
@@ -16,7 +14,7 @@ void route_list_hash_add(struct route_list_hash *hash, struct nl_addr *addr, str
 {
 	struct route_list *exists = NULL;
 
-	exists = get_list_by_addr(hash, addr);
+	exists = route_list_hash_get_by_addr(hash, addr);
 	if (exists != NULL) {
 		route_list_add(exists, route);
 	} else {
@@ -42,7 +40,7 @@ void route_list_hash_free(struct route_list_hash *hash)
 	route_list_hash_init(hash);
 }
 
-struct route_list *get_list_by_addr(struct route_list_hash *hash, struct nl_addr *addr)
+struct route_list *route_list_hash_get_by_addr(struct route_list_hash *hash, struct nl_addr *addr)
 {
 	for (int i = 0; i < hash->size; i++) {
 		if (nl_addr_cmp(addr, hash->list_addr[i]) == 0) {
