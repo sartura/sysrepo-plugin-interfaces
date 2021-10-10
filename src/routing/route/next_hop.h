@@ -23,7 +23,7 @@ struct route_next_hop_special {
 // list of interface indexes
 struct route_next_hop_list {
 	struct route_next_hop_simple *list;
-	int size;
+	size_t size;
 };
 
 union route_next_hop_value {

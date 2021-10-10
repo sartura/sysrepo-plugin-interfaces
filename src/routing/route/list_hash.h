@@ -11,7 +11,7 @@
 struct route_list_hash {
 	struct nl_addr **list_addr;
 	struct route_list *list_route;
-	int size;
+	size_t size;
 };
 
 void route_list_hash_init(struct route_list_hash *hash);

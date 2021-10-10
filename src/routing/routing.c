@@ -66,7 +66,7 @@
 static int routing_module_change_cb(sr_session_ctx_t *session, uint32_t subscription_id, const char *module_name, const char *xpath, sr_event_t event, uint32_t request_id, void *private_data);
 
 // module change helpers - changing/deleting values
-static int set_control_plane_protocol_value(char *xpath, const char *value);
+static int set_control_plane_protocol_value(char *xpath, char *value);
 static int set_ipv4_static_route_value(char *xpath, char *node_name, char *node_value);
 static void set_static_route_description(struct route_list *route_list, char *node_value);
 static int set_ipv4_static_route_simple_next_hop(struct route_list *route_list, char *node_value);
@@ -74,8 +74,8 @@ static int set_static_route_simple_outgoing_if(struct route_list *route_list, ch
 static int set_ipv6_static_route_value(char *xpath, char *node_name, char *node_value);
 static int set_ipv6_static_route_simple_next_hop(struct route_list *route_list, char *node_value);
 static int delete_control_plane_protocol_value(const char *xpath);
-static int set_rib_value(const char *node_xpath, const char *node_value);
-static int delete_rib_value(const char *node_xpath);
+static int set_rib_value(char *node_xpath, char *node_value);
+static int delete_rib_value(char *node_xpath);
 
 // getting xpath from the node
 static char *routing_xpath_get(const struct lyd_node *node);
@@ -110,7 +110,7 @@ static struct route_list_hash *ipv6_static_routes = NULL;
 
 static int static_routes_init(struct route_list_hash **ipv4_routes, struct route_list_hash **ipv6_routes);
 static void foreach_nexthop(struct rtnl_nexthop *nh, void *arg);
-static int update_static_routes(struct route_list_hash *routes, int family);
+static int update_static_routes(struct route_list_hash *routes, uint8_t family);
 
 int sr_plugin_init_cb(sr_session_ctx_t *session, void **private_data)
 {
@@ -309,7 +309,7 @@ static int routing_module_change_cb(sr_session_ctx_t *session, uint32_t subscrip
 	const char *prev_list = NULL;
 	int prev_default = false;
 	char *node_xpath = NULL;
-	const char *node_value = NULL;
+	char *node_value = NULL;
 
 	bool ipv4_update = false;
 	bool ipv6_update = false;
@@ -406,7 +406,7 @@ out:
 	return error != 0 ? SR_ERR_CALLBACK_FAILED : SR_ERR_OK;
 }
 
-static int update_static_routes(struct route_list_hash *routes, int family)
+static int update_static_routes(struct route_list_hash *routes, uint8_t family)
 {
 	struct nl_sock *socket = NULL;
 	struct rtnl_route *route = NULL;
@@ -501,12 +501,7 @@ error_out:
 	return error;
 }
 
-static int update_ipv6_static_routes(struct route_list_hash *routes)
-{
-	return 0;
-}
-
-static int set_control_plane_protocol_value(char *node_xpath, const char *node_value)
+static int set_control_plane_protocol_value(char *node_xpath, char *node_value)
 {
 	sr_xpath_ctx_t xpath_ctx = {0};
 
@@ -602,7 +597,6 @@ static int set_ipv4_static_route_value(char *xpath, char *node_name, char *node_
 	if (next_hop_list != NULL) {
 		route_list->list[0].next_hop.kind = route_next_hop_kind_list;
 
-		printf("next_hop_list index = %s\n", index);
 		if (!strcmp(node_name, "next-hop-address")) {
 		} else if (!strcmp(node_name, "outgoing-interface")) {
 		}
@@ -674,7 +668,6 @@ out:
 static int set_static_route_simple_outgoing_if(struct route_list *route_list, char *node_value)
 {
 	int ifindex = 0;
-	int error = 0;
 
 	route_list->list[0].next_hop.kind = route_next_hop_kind_simple;
 	route_list->list[0].next_hop.value.simple.if_name = xstrdup(node_value);
@@ -738,7 +731,6 @@ static int set_ipv6_static_route_value(char *xpath, char *node_name, char *node_
 	if (next_hop_list != NULL) {
 		route_list->list[0].next_hop.kind = route_next_hop_kind_list;
 
-		printf("next_hop_list index = %s\n", index);
 		if (!strcmp(node_name, "next-hop-address")) {
 		} else if (!strcmp(node_name, "outgoing-interface")) {
 		}
@@ -807,7 +799,7 @@ static int delete_control_plane_protocol_value(const char *node_xpath)
 	return 0;
 }
 
-static int set_rib_value(const char *node_xpath, const char *node_value)
+static int set_rib_value(char *node_xpath, char *node_value)
 {
 	sr_xpath_ctx_t xpath_ctx = {0};
 
@@ -831,7 +823,7 @@ out:
 	return error ? SR_ERR_CALLBACK_FAILED : SR_ERR_OK;
 }
 
-static int delete_rib_value(const char *node_xpath)
+static int delete_rib_value(char *node_xpath)
 {
 	sr_xpath_ctx_t xpath_ctx = {0};
 
@@ -855,87 +847,6 @@ out:
 	return error ? SR_ERR_CALLBACK_FAILED : SR_ERR_OK;
 }
 
-static int routing_module_change_rib_list_cb(sr_session_ctx_t *session, uint32_t subscription_id, const char *module_name, const char *xpath, sr_event_t event, uint32_t request_id, void *private_data)
-{
-	int error = 0;
-
-	// sysrepo
-	sr_session_ctx_t *startup_session = (sr_session_ctx_t *) private_data;
-	sr_change_iter_t *routing_change_iter = NULL;
-	sr_change_oper_t operation = SR_OP_CREATED;
-	sr_xpath_ctx_t xpath_ctx = {0};
-
-	// libyang
-	const struct lyd_node *node = NULL;
-
-	// temp helper vars
-	const char *prev_value = NULL;
-	const char *prev_list = NULL;
-	int prev_default = false;
-	char *node_xpath = NULL;
-	const char *node_value = NULL;
-
-	// node stuff
-	char *name_key = NULL;
-	char *node_name = NULL;
-
-	SRP_LOG_INF("module_name: %s, xpath: %s, event: %d, request_id: %u", module_name, xpath, event, request_id);
-
-	if (event == SR_EV_ABORT) {
-		SRP_LOG_ERR("aborting changes for: %s", xpath);
-		error = -1;
-		goto error_out;
-	} else if (event == SR_EV_DONE) {
-		error = sr_copy_config(startup_session, BASE_YANG_MODEL, SR_DS_RUNNING, 0);
-		if (error) {
-			SRP_LOG_ERR("sr_copy_config error (%d): %s", error, sr_strerror(error));
-			goto error_out;
-		}
-	} else if (event == SR_EV_CHANGE) {
-		error = sr_get_changes_iter(session, xpath, &routing_change_iter);
-		if (error) {
-			SRP_LOG_ERR("sr_get_changes_iter error (%d): %s", error, sr_strerror(error));
-			goto error_out;
-		}
-
-		while (sr_get_change_tree_next(session, routing_change_iter, &operation, &node, &prev_value, &prev_list, &prev_default) == SR_ERR_OK) {
-			node_xpath = routing_xpath_get(node);
-
-			if (node->schema->nodetype == LYS_LEAF || node->schema->nodetype == LYS_LEAFLIST) {
-				node_value = xstrdup(lyd_get_value(node));
-			}
-
-			SRP_LOG_DBG("node_xpath: %s; prev_val: %s; node_val: %s; operation: %d", node_xpath, prev_value, node_value, operation);
-
-			if (node->schema->nodetype == LYS_LEAF || node->schema->nodetype == LYS_LEAFLIST) {
-				node_name = sr_xpath_last_node(node_xpath, &xpath_ctx);
-				name_key = sr_xpath_key_value(node_xpath, "rib", "name", &xpath_ctx);
-
-				if (strncmp(node_name, "description", sizeof("description") - 1) == 0) {
-					error = routing_rib_set_description(name_key, node_value);
-					if (error != 0) {
-						SRP_LOG_ERR("routing_rib_set_description failed");
-						goto error_out;
-					}
-				}
-			}
-			FREE_SAFE(node_xpath);
-			node_value = NULL;
-		}
-	}
-	goto out;
-
-error_out:
-	SRP_LOG_ERR("error applying ribs module changes");
-	error = -1;
-
-out:
-	FREE_SAFE(node_xpath);
-	sr_free_change_iter(routing_change_iter);
-
-	return error != 0 ? SR_ERR_CALLBACK_FAILED : SR_ERR_OK;
-}
-
 static int routing_control_plane_protocol_set_description(const char *type, const char *name, const char *description)
 {
 	int error = 0;
@@ -957,7 +868,7 @@ static int routing_control_plane_protocol_set_description(const char *type, cons
 		goto error_out;
 	}
 
-	for (int i = 0; i < ROUTING_PROTOS_COUNT; i++) {
+	for (size_t i = 0; i < ROUTING_PROTOS_COUNT; i++) {
 		control_plane_protocol_init(&protos[i]);
 	}
 
@@ -1004,9 +915,9 @@ static int routing_control_plane_protocol_set_description(const char *type, cons
 		fclose(fptr);
 		fptr = fopen(path_buffer, "w");
 
-		for (int i = 0; i < ROUTING_PROTOS_COUNT; i++) {
+		for (size_t i = 0; i < ROUTING_PROTOS_COUNT; i++) {
 			if (protos[i].initialized == 1) {
-				fprintf(fptr, "%d\t%s\t\"%s\"\n", i, protos[i].type, protos[i].description);
+				fprintf(fptr, "%lu\t%s\t\"%s\"\n", i, protos[i].type, protos[i].description);
 			}
 		}
 	}
@@ -1019,7 +930,7 @@ out:
 		fclose(fptr);
 	}
 
-	for (int i = 0; i < ROUTING_PROTOS_COUNT; i++) {
+	for (size_t i = 0; i < ROUTING_PROTOS_COUNT; i++) {
 		control_plane_protocol_free(&protos[i]);
 	}
 	return error;
@@ -1051,7 +962,7 @@ static int routing_rib_set_description(const char *name, const char *description
 	// list of descriptions
 	struct {
 		struct rib_description_pair *list;
-		int size;
+		size_t size;
 	} rib_descriptions = {0};
 
 	// first read all descriptions from the map file and change the wanted description
@@ -1098,7 +1009,7 @@ static int routing_rib_set_description(const char *name, const char *description
 
 	SRP_LOG_DBG("setting description of %s to \"%s\"", name, description);
 
-	for (int i = 0; i < rib_descriptions.size; i++) {
+	for (size_t i = 0; i < rib_descriptions.size; i++) {
 		struct rib_description_pair *PAIR = &rib_descriptions.list[i];
 		if (strncmp(PAIR->name, name, NAME_LEN) == 0) {
 			// found description -> change it
@@ -1123,7 +1034,7 @@ static int routing_rib_set_description(const char *name, const char *description
 	fclose(fptr);
 	fptr = fopen(path_buffer, "w");
 
-	for (int i = 0; i < rib_descriptions.size; i++) {
+	for (size_t i = 0; i < rib_descriptions.size; i++) {
 		SRP_LOG_DBG("%s = %s", rib_descriptions.list[i].name, rib_descriptions.list[i].description);
 		fprintf(fptr, "%s\t\"%s\"\n", rib_descriptions.list[i].name, rib_descriptions.list[i].description);
 	}
@@ -1255,7 +1166,7 @@ static void foreach_nexthop(struct rtnl_nexthop *nh, void *arg)
 	char *if_name = NULL;
 	int nl_err = 0;
 
-	nl_err = nl_socket_alloc();
+	socket = nl_socket_alloc();
 	if (socket == NULL) {
 		SRP_LOG_ERR("unable to init nl_sock struct...");
 		return;
@@ -1353,7 +1264,7 @@ static int routing_oper_get_rib_routes_cb(sr_session_ctx_t *session, uint32_t su
 		goto error_out;
 	}
 
-	for (int hash_iter = 0; hash_iter < ribs.size; hash_iter++) {
+	for (size_t hash_iter = 0; hash_iter < ribs.size; hash_iter++) {
 		// create new routes container for every table
 		const struct route_list_hash *ROUTES_HASH = &ribs.list[hash_iter].routes;
 		const int ADDR_FAMILY = ribs.list[hash_iter].address_family;
@@ -1365,7 +1276,7 @@ static int routing_oper_get_rib_routes_cb(sr_session_ctx_t *session, uint32_t su
 			goto error_out;
 		}
 
-		for (int i = 0; i < ROUTES_HASH->size; i++) {
+		for (size_t i = 0; i < ROUTES_HASH->size; i++) {
 			struct route_list *list_ptr = &ROUTES_HASH->list_route[i];
 			struct nl_addr *dst_prefix = ROUTES_HASH->list_addr[i];
 			nl_addr2str(dst_prefix, ip_buffer, sizeof(ip_buffer));
@@ -1377,7 +1288,7 @@ static int routing_oper_get_rib_routes_cb(sr_session_ctx_t *session, uint32_t su
 				snprintf(prefix_buffer, sizeof(prefix_buffer), "%s", ip_buffer);
 			}
 
-			for (int j = 0; j < list_ptr->size; j++) {
+			for (size_t j = 0; j < list_ptr->size; j++) {
 				const struct route *ROUTE = &list_ptr->list[j];
 				// create a new list and after that add properties to it
 				ly_err = lyd_new_path(routes_node, ly_ctx, "routes/route", NULL, 0, &ly_node);
@@ -1450,7 +1361,7 @@ static int routing_oper_get_rib_routes_cb(sr_session_ctx_t *session, uint32_t su
 							goto error_out;
 						}
 
-						for (int k = 0; k < NEXTHOP_LIST->size; k++) {
+						for (size_t k = 0; k < NEXTHOP_LIST->size; k++) {
 							struct rtnl_link *iface = rtnl_link_get(link_cache, NEXTHOP_LIST->list[k].ifindex);
 							const char *if_name = rtnl_link_get_name(iface);
 
@@ -1622,7 +1533,6 @@ static int routing_load_ribs(sr_session_ctx_t *session, struct lyd_node *routing
 	// libyang
 	struct lyd_node *ribs_node = NULL, *rib_node = NULL, *added_node = NULL;
 	const struct ly_ctx *ly_ctx = NULL;
-	const struct lys_module *ly_uv4mod = NULL, *ly_uv6mod = NULL;
 
 	// libnl
 	struct nl_sock *socket = NULL;
@@ -1633,10 +1543,7 @@ static int routing_load_ribs(sr_session_ctx_t *session, struct lyd_node *routing
 	char list_buffer[PATH_MAX] = {0};
 
 	ly_ctx = sr_get_context(sr_session_get_connection(session));
-	if (ly_ctx) {
-		ly_uv4mod = ly_ctx_get_module(ly_ctx, "ietf-ipv4-unicast-routing", "2018-03-13");
-		ly_uv6mod = ly_ctx_get_module(ly_ctx, "ietf-ipv6-unicast-routing", "2018-03-13");
-	} else {
+	if (!ly_ctx) {
 		SRP_LOG_ERR("unable to load external modules... exiting");
 		error = -1;
 		goto error_out;
@@ -1687,7 +1594,7 @@ static int routing_load_ribs(sr_session_ctx_t *session, struct lyd_node *routing
 
 	// all RIBs loaded - add them to the initial config
 	struct rib *iter = NULL;
-	for (int i = 0; i < ribs.size; i++) {
+	for (size_t i = 0; i < ribs.size; i++) {
 		iter = &ribs.list[i];
 		SRP_LOG_DBG("adding table %s to the list", iter->name);
 
@@ -1833,15 +1740,15 @@ static int routing_collect_routes(struct nl_cache *routes_cache, struct nl_cache
 		route = (struct rtnl_route *) nl_cache_get_next((struct nl_object *) route);
 	}
 
-	for (int i = 0; i < ribs->size; i++) {
+	for (size_t i = 0; i < ribs->size; i++) {
 		const struct route_list_hash *routes_hash = &ribs->list[i].routes;
 		if (routes_hash->size) {
 			// iterate every "hash" and set the active value for the preferred route
-			for (int j = 0; j < routes_hash->size; j++) {
+			for (size_t j = 0; j < routes_hash->size; j++) {
 				struct route_list *ls = &routes_hash->list_route[j];
 				if (ls->size > 0) {
 					struct route *pref = &ls->list[0];
-					for (int k = 1; k < ls->size; k++) {
+					for (size_t k = 1; k < ls->size; k++) {
 						struct route *ptr = &ls->list[k];
 						if (ptr->preference < pref->preference) {
 							pref = ptr;
@@ -1883,8 +1790,6 @@ static int routing_load_control_plane_protocols(sr_session_ctx_t *session, struc
 
 	// control-plane-protocol structs
 	struct control_plane_protocol cpp_map[ROUTING_PROTOS_COUNT] = {0};
-	struct control_plane_protocol *STATIC_PROTO = &cpp_map[RTPROT_STATIC];
-	struct route tmp_route = {0};
 
 	ly_ctx = sr_get_context(sr_session_get_connection(session));
 	if (ly_ctx) {
@@ -1924,7 +1829,7 @@ static int routing_load_control_plane_protocols(sr_session_ctx_t *session, struc
 	// control plane protocols container created - add all protocols to the inner list
 
 	// add the data to the datastore
-	for (int i = 0; i < ROUTING_PROTOS_COUNT; i++) {
+	for (size_t i  = 0; i < ROUTING_PROTOS_COUNT; i++) {
 		const struct control_plane_protocol *proto = &cpp_map[i];
 		if (proto->initialized) {
 			// write proto path - type + name are added automatically when creating the list node
@@ -1963,7 +1868,7 @@ static int routing_load_control_plane_protocols(sr_session_ctx_t *session, struc
 				}
 
 				// ipv4
-				for (int j = 0; j < ipv4_static_routes->size; j++) {
+				for (size_t j = 0; j < ipv4_static_routes->size; j++) {
 					const struct nl_addr *DST_PREFIX = ipv4_static_routes->list_addr[j];
 					const struct route *ROUTE = &ipv4_static_routes->list_route[j].list[0];
 					const union route_next_hop_value *NEXTHOP = &ROUTE->next_hop.value;
@@ -2029,7 +1934,7 @@ static int routing_load_control_plane_protocols(sr_session_ctx_t *session, struc
 								SRP_LOG_ERR("unable to create new next-hop-list/next-hop list for the node %s", route_path_buffer);
 								goto error_out;
 							}
-							for (int k = 0; k < NEXTHOP_LIST->size; k++) {
+							for (size_t k = 0; k < NEXTHOP_LIST->size; k++) {
 								// next-hop-address
 								if (NEXTHOP_LIST->list[k].addr) {
 									nl_addr2str(NEXTHOP_LIST->list[k].addr, ip_buffer, sizeof(ip_buffer));
@@ -2052,7 +1957,7 @@ static int routing_load_control_plane_protocols(sr_session_ctx_t *session, struc
 				}
 
 				// ipv6
-				for (int j = 0; j < ipv6_static_routes->size; j++) {
+				for (size_t j = 0; j < ipv6_static_routes->size; j++) {
 					const struct nl_addr *DST_PREFIX = ipv6_static_routes->list_addr[j];
 					const struct route *ROUTE = &ipv6_static_routes->list_route[j].list[0];
 					const union route_next_hop_value *NEXTHOP = &ROUTE->next_hop.value;
@@ -2118,7 +2023,7 @@ static int routing_load_control_plane_protocols(sr_session_ctx_t *session, struc
 								SRP_LOG_ERR("unable to create new next-hop-list/next-hop list for the node %s", route_path_buffer);
 								goto error_out;
 							}
-							for (int k = 0; k < NEXTHOP_LIST->size; k++) {
+							for (size_t k = 0; k < NEXTHOP_LIST->size; k++) {
 								// next-hop-address
 								if (NEXTHOP_LIST->list[k].addr) {
 									nl_addr2str(NEXTHOP_LIST->list[k].addr, ip_buffer, sizeof(ip_buffer));
@@ -2150,7 +2055,7 @@ error_out:
 	error = 1;
 out:
 	// free all control plane protocol structs
-	for (int i = 0; i < ROUTING_PROTOS_COUNT; i++) {
+	for (size_t i = 0; i < ROUTING_PROTOS_COUNT; i++) {
 		control_plane_protocol_free(&cpp_map[i]);
 	}
 
@@ -2172,7 +2077,7 @@ static int routing_build_rib_descriptions(struct rib_list *ribs)
 	};
 	struct {
 		struct rib_description_pair *list;
-		int size;
+		size_t size;
 	} rib_descriptions = {0};
 
 	// file stream
@@ -2233,7 +2138,7 @@ static int routing_build_rib_descriptions(struct rib_list *ribs)
 	}
 
 	// now iterate over each rib and set its description
-	for (int i = 0; i < ribs->size; i++) {
+	for (size_t i = 0; i < ribs->size; i++) {
 		const struct rib *RIB = &ribs->list[i];
 		const int TABLE_ID = rtnl_route_str2table(RIB->name);
 
@@ -2247,7 +2152,7 @@ static int routing_build_rib_descriptions(struct rib_list *ribs)
 		const size_t NAME_LEN = strlen(name_buffer);
 
 		// set the description for each AF
-		for (int j = 0; j < rib_descriptions.size; j++) {
+		for (size_t j = 0; j < rib_descriptions.size; j++) {
 			const struct rib_description_pair *PAIR = &rib_descriptions.list[j];
 			if (strncmp(name_buffer, PAIR->name, NAME_LEN) == 0) {
 				memcpy(((struct rib *) RIB)->description, PAIR->description, sizeof(PAIR->description));

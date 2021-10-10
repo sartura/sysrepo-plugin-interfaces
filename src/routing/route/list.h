@@ -5,7 +5,7 @@
 
 struct route_list {
 	struct route *list;
-	int size;
+	size_t size;
 };
 
 void route_list_init(struct route_list *ls);

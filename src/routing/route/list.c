@@ -25,7 +25,7 @@ struct route *route_list_get_last(struct route_list *ls)
 void route_list_free(struct route_list *ls)
 {
 	if (ls->list) {
-		for (int i = 0; i < ls->size; i++) {
+		for (size_t i = 0; i < ls->size; i++) {
 			route_free(&ls->list[i]);
 		}
 		FREE_SAFE(ls->list);

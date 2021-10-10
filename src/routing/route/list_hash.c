@@ -30,7 +30,7 @@ void route_list_hash_add(struct route_list_hash *hash, struct nl_addr *addr, str
 void route_list_hash_free(struct route_list_hash *hash)
 {
 	if (hash->size) {
-		for (int i = 0; i < hash->size; i++) {
+		for (size_t i = 0; i < hash->size; i++) {
 			nl_addr_put(hash->list_addr[i]);
 			route_list_free(&hash->list_route[i]);
 		}
@@ -42,7 +42,7 @@ void route_list_hash_free(struct route_list_hash *hash)
 
 struct route_list *route_list_hash_get_by_addr(struct route_list_hash *hash, struct nl_addr *addr)
 {
-	for (int i = 0; i < hash->size; i++) {
+	for (size_t i = 0; i < hash->size; i++) {
 		if (nl_addr_cmp(addr, hash->list_addr[i]) == 0) {
 			return &hash->list_route[i];
 		}
