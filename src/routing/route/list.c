@@ -8,6 +8,12 @@ void route_list_init(struct route_list *ls)
 {
 	ls->list = NULL;
 	ls->size = 0;
+	ls->delete = false;
+}
+
+bool route_list_is_empty(struct route_list *ls)
+{
+	return ls->list == NULL && ls->size == 0;
 }
 
 void route_list_add(struct route_list *ls, struct route *route)
