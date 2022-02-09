@@ -141,7 +141,7 @@ int sr_plugin_init_cb(sr_session_ctx_t *session, void **private_data)
 	SRP_LOG_INF("subscribing to module change");
 
 	// control-plane-protocol list module changes
-	error = sr_module_change_subscribe(session, BASE_YANG_MODEL, ROUTING_CONTROL_PLANE_PROTOCOL_LIST_YANG_PATH "//*", routing_module_change_control_plane_protocol_cb, *private_data, 0, SR_SUBSCR_DEFAULT, &subscription);
+	error = sr_module_change_subscribe(session, BASE_YANG_MODEL, ROUTING_CONTROL_PLANE_PROTOCOL_LIST_YANG_PATH, routing_module_change_control_plane_protocol_cb, *private_data, 0, SR_SUBSCR_DEFAULT, &subscription);
 	if (error) {
 		SRP_LOG_ERR("sr_module_change_subscribe error (%d): %s", error, sr_strerror(error));
 		goto error_out;
@@ -310,6 +310,7 @@ static int routing_module_change_control_plane_protocol_cb(sr_session_ctx_t *ses
 	sr_session_ctx_t *startup_session = (sr_session_ctx_t *) private_data;
 	sr_change_iter_t *routing_change_iter = NULL;
 	sr_change_oper_t operation = SR_OP_CREATED;
+	char changes_path_buffer[2048] = {0};
 
 	// libyang
 	const struct lyd_node *node = NULL;
@@ -326,6 +327,12 @@ static int routing_module_change_control_plane_protocol_cb(sr_session_ctx_t *ses
 	bool ipv4_update = false;
 	bool ipv6_update = false;
 
+	error = snprintf(changes_path_buffer, sizeof(changes_path_buffer), "%s//*", xpath);
+	if (error < 0) {
+		SRP_LOG_ERR("unable to create full path for changes");
+		goto error_out;
+	}
+
 	SRP_LOG_INF("module_name: %s, xpath: %s, event: %d, request_id: %u", module_name, xpath, event, request_id);
 
 	if (event == SR_EV_ABORT) {
@@ -339,7 +346,7 @@ static int routing_module_change_control_plane_protocol_cb(sr_session_ctx_t *ses
 			goto error_out;
 		}
 	} else if (event == SR_EV_CHANGE) {
-		error = sr_get_changes_iter(session, xpath, &routing_change_iter);
+		error = sr_get_changes_iter(session, changes_path_buffer, &routing_change_iter);
 		if (error) {
 			SRP_LOG_ERR("sr_get_changes_iter error (%d): %s", error, sr_strerror(error));
 			goto error_out;
@@ -454,10 +461,7 @@ static int update_static_routes(struct route_list_hash *routes, uint8_t family)
 		rtnl_route_set_table(route, RT_TABLE_MAIN);
 		rtnl_route_set_protocol(route, RTPROT_STATIC);
 		rtnl_route_set_family(route, family);
-		char buffer[256] = {0};
 		dst_addr = nl_addr_clone(routes->list_addr[i]);
-		nl_addr2str(dst_addr, buffer, sizeof(buffer));
-		SRP_LOG_DBG("ADDR = %s", buffer);
 		rtnl_route_set_dst(route, dst_addr);
 		rtnl_route_set_priority(route, routes->list_route[i].list[0].preference);
 
@@ -465,7 +469,6 @@ static int update_static_routes(struct route_list_hash *routes, uint8_t family)
 			// TODO: research why the type needs to be specified for special kind of next-hop - otherwise rtnl_route_delete() returns "Object not found"
 			if (routes->list_route[i].list[0].next_hop.kind == route_next_hop_kind_special) {
 				const char *special = routes->list_route[i].list[0].next_hop.value.special.value;
-				SRP_LOG_DBG("special = %s", special);
 				if (!strcmp(special, "blackhole")) {
 					rtnl_route_set_type(route, RTN_BLACKHOLE);
 				} else if (!strcmp(special, "unreachable")) {
