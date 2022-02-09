@@ -58,7 +58,7 @@
 #define SYSREPOCFG_EMPTY_CHECK_COMMAND "sysrepocfg -X -d running -m " BASE_YANG_MODEL
 
 // module change
-static int routing_module_change_cb(sr_session_ctx_t *session, const char *module_name, const char *xpath, sr_event_t event, uint32_t request_id, void *private_data);
+static int routing_module_change_control_plane_protocol_cb(sr_session_ctx_t *session, const char *module_name, const char *xpath, sr_event_t event, uint32_t request_id, void *private_data);
 
 // module change helpers - changing/deleting values
 static int set_control_plane_protocol_value(char *xpath, char *value);
@@ -141,7 +141,7 @@ int sr_plugin_init_cb(sr_session_ctx_t *session, void **private_data)
 	SRP_LOG_INF("subscribing to module change");
 
 	// control-plane-protocol list module changes
-	error = sr_module_change_subscribe(session, BASE_YANG_MODEL, "/" BASE_YANG_MODEL ":*//.", routing_module_change_cb, *private_data, 0, SR_SUBSCR_DEFAULT, &subscription);
+	error = sr_module_change_subscribe(session, BASE_YANG_MODEL, ROUTING_CONTROL_PLANE_PROTOCOL_LIST_YANG_PATH "//*", routing_module_change_control_plane_protocol_cb, *private_data, 0, SR_SUBSCR_DEFAULT, &subscription);
 	if (error) {
 		SRP_LOG_ERR("sr_module_change_subscribe error (%d): %s", error, sr_strerror(error));
 		goto error_out;
@@ -302,7 +302,7 @@ void sr_plugin_cleanup_cb(sr_session_ctx_t *session, void *private_data)
 	FREE_SAFE(ipv6_static_routes);
 }
 
-static int routing_module_change_cb(sr_session_ctx_t *session, const char *module_name, const char *xpath, sr_event_t event, uint32_t request_id, void *private_data)
+static int routing_module_change_control_plane_protocol_cb(sr_session_ctx_t *session, const char *module_name, const char *xpath, sr_event_t event, uint32_t request_id, void *private_data)
 {
 	int error = 0;
 
@@ -367,20 +367,16 @@ static int routing_module_change_cb(sr_session_ctx_t *session, const char *modul
 				}
 
 				if (operation == SR_OP_CREATED || operation == SR_OP_MODIFIED) {
-					if (strstr(node_xpath, "ietf-routing:routing/control-plane-protocols")) {
-						error = set_control_plane_protocol_value(node_xpath, (char *) node_value);
-						if (error) {
-							SRP_LOG_ERR("set_control_plane_protocol_value error (%d)", error);
-							goto error_out;
-						}
+					error = set_control_plane_protocol_value(node_xpath, (char *) node_value);
+					if (error) {
+						SRP_LOG_ERR("set_control_plane_protocol_value error (%d)", error);
+						goto error_out;
 					}
 				} else if (operation == SR_OP_DELETED) {
-					if (strstr(node_xpath, "ietf-routing:routing/control-plane-protocols")) {
-						error = delete_control_plane_protocol_value(node_xpath);
-						if (error) {
-							SRP_LOG_ERR("set_control_plane_protocol_value error (%d)", error);
-							goto error_out;
-						}
+					error = delete_control_plane_protocol_value(node_xpath);
+					if (error) {
+						SRP_LOG_ERR("set_control_plane_protocol_value error (%d)", error);
+						goto error_out;
 					}
 				}
 			}
