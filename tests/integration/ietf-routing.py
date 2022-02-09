@@ -107,8 +107,6 @@ class StaticRoutesTestCase(RoutingTestCase):
         op_data.free()
         data.free()
 
-        pass
-
 
 class RoutesTestCase(RoutingTestCase):
     def test_routes(self):
