@@ -58,7 +58,7 @@
 #define SYSREPOCFG_EMPTY_CHECK_COMMAND "sysrepocfg -X -d running -m " BASE_YANG_MODEL
 
 // module change
-static int routing_module_change_cb(sr_session_ctx_t *session, const char *module_name, const char *xpath, sr_event_t event, uint32_t request_id, void *private_data);
+static int routing_module_change_control_plane_protocol_cb(sr_session_ctx_t *session, const char *module_name, const char *xpath, sr_event_t event, uint32_t request_id, void *private_data);
 
 // module change helpers - changing/deleting values
 static int set_control_plane_protocol_value(char *xpath, char *value);
@@ -66,6 +66,7 @@ static int set_static_route_value(char *xpath, char *node_name, char *node_value
 static void set_static_route_description(struct route_list *route_list, char *node_value);
 static int set_static_route_simple_next_hop(struct route_list *route_list, char *node_value, int family);
 static int set_static_route_simple_outgoing_if(struct route_list *route_list, char *node_value);
+static int set_static_route_special(struct route_list *route_list, char *node_value);
 static int delete_control_plane_protocol_value(char *xpath);
 static int delete_static_route_value(char *xpath, char *node_name, int family);
 
@@ -140,7 +141,7 @@ int sr_plugin_init_cb(sr_session_ctx_t *session, void **private_data)
 	SRP_LOG_INF("subscribing to module change");
 
 	// control-plane-protocol list module changes
-	error = sr_module_change_subscribe(session, BASE_YANG_MODEL, "/" BASE_YANG_MODEL ":*//.", routing_module_change_cb, *private_data, 0, SR_SUBSCR_DEFAULT, &subscription);
+	error = sr_module_change_subscribe(session, BASE_YANG_MODEL, ROUTING_CONTROL_PLANE_PROTOCOL_LIST_YANG_PATH, routing_module_change_control_plane_protocol_cb, *private_data, 0, SR_SUBSCR_DEFAULT, &subscription);
 	if (error) {
 		SRP_LOG_ERR("sr_module_change_subscribe error (%d): %s", error, sr_strerror(error));
 		goto error_out;
@@ -228,21 +229,40 @@ static int static_routes_init(struct route_list_hash **ipv4_routes, struct route
 
 		if (PROTO == RTPROT_STATIC) {
 			const int AF = rtnl_route_get_family(route);
+			const int TYPE = rtnl_route_get_type(route);
 			// fill the route with info and add to the hash of the current RIB
 			route_init(&tmp_route);
 			route_set_preference(&tmp_route, rtnl_route_get_priority(route));
 
 			// next-hop container -> TODO: see what about special type
-			const int NEXTHOP_COUNT = rtnl_route_get_nnexthops(route);
-			if (NEXTHOP_COUNT == 1) {
-				struct rtnl_nexthop *nh = rtnl_route_nexthop_n(route, 0);
-				ifindex = rtnl_route_nh_get_ifindex(nh);
-				iface = rtnl_link_get(link_cache, ifindex);
-				if_name = xstrdup(rtnl_link_get_name(iface));
-				route_next_hop_set_simple(&tmp_route.next_hop, ifindex, if_name, rtnl_route_nh_get_gateway(nh));
-				rtnl_link_put(iface);
-			} else {
-				rtnl_route_foreach_nexthop(route, foreach_nexthop, &tmp_route.next_hop);
+			switch (TYPE) {
+				case RTN_BLACKHOLE:
+					route_next_hop_set_special(&tmp_route.next_hop, "blackhole");
+					break;
+				case RTN_UNREACHABLE:
+					route_next_hop_set_special(&tmp_route.next_hop, "unreachable");
+					break;
+				case RTN_PROHIBIT:
+					route_next_hop_set_special(&tmp_route.next_hop, "prohibit");
+					break;
+				case RTN_LOCAL:
+					route_next_hop_set_special(&tmp_route.next_hop, "local");
+					break;
+				default: {
+					const int NEXTHOP_COUNT = rtnl_route_get_nnexthops(route);
+					if (NEXTHOP_COUNT == 1) {
+						struct rtnl_nexthop *nh = rtnl_route_nexthop_n(route, 0);
+						ifindex = rtnl_route_nh_get_ifindex(nh);
+						iface = rtnl_link_get(link_cache, ifindex);
+						if_name = rtnl_link_get_name(iface);
+						route_next_hop_set_simple(&tmp_route.next_hop, ifindex, if_name, rtnl_route_nh_get_gateway(nh));
+
+						// free recieved link
+						rtnl_link_put(iface);
+					} else {
+						rtnl_route_foreach_nexthop(route, foreach_nexthop, &tmp_route.next_hop);
+					}
+				}
 			}
 
 			// route-metadata/source-protocol
@@ -282,7 +302,7 @@ void sr_plugin_cleanup_cb(sr_session_ctx_t *session, void *private_data)
 	FREE_SAFE(ipv6_static_routes);
 }
 
-static int routing_module_change_cb(sr_session_ctx_t *session, const char *module_name, const char *xpath, sr_event_t event, uint32_t request_id, void *private_data)
+static int routing_module_change_control_plane_protocol_cb(sr_session_ctx_t *session, const char *module_name, const char *xpath, sr_event_t event, uint32_t request_id, void *private_data)
 {
 	int error = 0;
 
@@ -290,6 +310,7 @@ static int routing_module_change_cb(sr_session_ctx_t *session, const char *modul
 	sr_session_ctx_t *startup_session = (sr_session_ctx_t *) private_data;
 	sr_change_iter_t *routing_change_iter = NULL;
 	sr_change_oper_t operation = SR_OP_CREATED;
+	char changes_path_buffer[2048] = {0};
 
 	// libyang
 	const struct lyd_node *node = NULL;
@@ -306,6 +327,12 @@ static int routing_module_change_cb(sr_session_ctx_t *session, const char *modul
 	bool ipv4_update = false;
 	bool ipv6_update = false;
 
+	error = snprintf(changes_path_buffer, sizeof(changes_path_buffer), "%s//*", xpath);
+	if (error < 0) {
+		SRP_LOG_ERR("unable to create full path for changes");
+		goto error_out;
+	}
+
 	SRP_LOG_INF("module_name: %s, xpath: %s, event: %d, request_id: %u", module_name, xpath, event, request_id);
 
 	if (event == SR_EV_ABORT) {
@@ -319,7 +346,7 @@ static int routing_module_change_cb(sr_session_ctx_t *session, const char *modul
 			goto error_out;
 		}
 	} else if (event == SR_EV_CHANGE) {
-		error = sr_get_changes_iter(session, xpath, &routing_change_iter);
+		error = sr_get_changes_iter(session, changes_path_buffer, &routing_change_iter);
 		if (error) {
 			SRP_LOG_ERR("sr_get_changes_iter error (%d): %s", error, sr_strerror(error));
 			goto error_out;
@@ -347,20 +374,16 @@ static int routing_module_change_cb(sr_session_ctx_t *session, const char *modul
 				}
 
 				if (operation == SR_OP_CREATED || operation == SR_OP_MODIFIED) {
-					if (strstr(node_xpath, "ietf-routing:routing/control-plane-protocols")) {
-						error = set_control_plane_protocol_value(node_xpath, (char *) node_value);
-						if (error) {
-							SRP_LOG_ERR("set_control_plane_protocol_value error (%d)", error);
-							goto error_out;
-						}
+					error = set_control_plane_protocol_value(node_xpath, (char *) node_value);
+					if (error) {
+						SRP_LOG_ERR("set_control_plane_protocol_value error (%d)", error);
+						goto error_out;
 					}
 				} else if (operation == SR_OP_DELETED) {
-					if (strstr(node_xpath, "ietf-routing:routing/control-plane-protocols")) {
-						error = delete_control_plane_protocol_value(node_xpath);
-						if (error) {
-							SRP_LOG_ERR("set_control_plane_protocol_value error (%d)", error);
-							goto error_out;
-						}
+					error = delete_control_plane_protocol_value(node_xpath);
+					if (error) {
+						SRP_LOG_ERR("set_control_plane_protocol_value error (%d)", error);
+						goto error_out;
 					}
 				}
 			}
@@ -443,11 +466,24 @@ static int update_static_routes(struct route_list_hash *routes, uint8_t family)
 		rtnl_route_set_priority(route, routes->list_route[i].list[0].preference);
 
 		if (routes->list_route[i].delete) {
+			// TODO: research why the type needs to be specified for special kind of next-hop - otherwise rtnl_route_delete() returns "Object not found"
+			if (routes->list_route[i].list[0].next_hop.kind == route_next_hop_kind_special) {
+				const char *special = routes->list_route[i].list[0].next_hop.value.special.value;
+				if (!strcmp(special, "blackhole")) {
+					rtnl_route_set_type(route, RTN_BLACKHOLE);
+				} else if (!strcmp(special, "unreachable")) {
+					rtnl_route_set_type(route, RTN_UNREACHABLE);
+				} else if (!strcmp(special, "prohibit")) {
+					rtnl_route_set_type(route, RTN_PROHIBIT);
+				} else if (!strcmp(special, "receive")) {
+					rtnl_route_set_type(route, RTN_LOCAL);
+				}
+			}
 			rtnl_route_set_scope(route, RT_SCOPE_NOWHERE);
 			nl_err = rtnl_route_delete(socket, route, 0);
 			if (nl_err != 0) {
 				error = -1;
-				SRP_LOG_ERR("nl_connect failed (%d): %s", nl_err, nl_geterror(nl_err));
+				SRP_LOG_ERR("rtnl_route_delete failed (%d): %s", nl_err, nl_geterror(nl_err));
 				goto error_out;
 			}
 			rtnl_route_put(route);
@@ -489,6 +525,17 @@ static int update_static_routes(struct route_list_hash *routes, uint8_t family)
 				rtnl_route_nh_set_ifindex(next_hop, routes->list_route[i].list[0].next_hop.value.list.list[j].ifindex);
 				rtnl_route_nh_set_gateway(next_hop, routes->list_route[i].list[0].next_hop.value.list.list[j].addr);
 				rtnl_route_add_nexthop(route, next_hop);
+			}
+		} else if (routes->list_route[i].list[0].next_hop.kind == route_next_hop_kind_special) {
+			const char *special = routes->list_route[i].list[0].next_hop.value.special.value;
+			if (!strcmp(special, "blackhole")) {
+				rtnl_route_set_type(route, RTN_BLACKHOLE);
+			} else if (!strcmp(special, "unreachable")) {
+				rtnl_route_set_type(route, RTN_UNREACHABLE);
+			} else if (!strcmp(special, "prohibit")) {
+				rtnl_route_set_type(route, RTN_PROHIBIT);
+			} else if (!strcmp(special, "receive")) {
+				rtnl_route_set_type(route, RTN_LOCAL);
 			}
 		}
 
@@ -615,6 +662,13 @@ static int set_static_route_value(char *xpath, char *node_name, char *node_value
 			SRP_LOG_ERR("failed to set static route next-hop-address");
 			goto out;
 		}
+	} else if (!strcmp(node_name, "special-next-hop")) {
+		error = set_static_route_special(route_list, node_value);
+		if (error) {
+			error = -1;
+			SRP_LOG_ERR("failed to set static route special value");
+			goto out;
+		}
 	}
 
 out:
@@ -658,6 +712,12 @@ static int set_static_route_simple_outgoing_if(struct route_list *route_list, ch
 	}
 
 	route_list->list[0].next_hop.value.simple.ifindex = ifindex;
+	return 0;
+}
+
+static int set_static_route_special(struct route_list *route_list, char *node_value)
+{
+	route_next_hop_set_special(&route_list->list[0].next_hop, node_value);
 	return 0;
 }
 
@@ -735,18 +795,8 @@ static int delete_static_route_value(char *xpath, char *node_name, int family)
 
 	if (next_hop_list != NULL) {
 		route_list->list[0].next_hop.kind = route_next_hop_kind_list;
-
-		if (!strcmp(node_name, "next-hop-address")) {
-		} else if (!strcmp(node_name, "outgoing-interface")) {
-		}
 	} else if (!strcmp(node_name, "destination-prefix")) {
 		route_list->delete = true;
-	} else if (!strcmp(node_name, "description")) {
-		set_static_route_description(route_list, NULL);
-	} else if (!strcmp(node_name, "next-hop-address")) {
-		route_list->list[0].next_hop.value.simple.addr = NULL;
-	} else if (!strcmp(node_name, "outgoing-interface")) {
-		route_list->list[0].next_hop.value.simple.if_name = NULL;
 	}
 
 out:
