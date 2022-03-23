@@ -47,7 +47,6 @@ Besides the usual C development environment, the following additional dependenci
 First clone the repository:
 
 ```sh
-# clone recursively to also clone uthash library
 $ git clone https://github.com/telekom/sysrepo-plugin-interfaces --recursive
 ```
 
